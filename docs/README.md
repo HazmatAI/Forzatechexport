@@ -9,6 +9,7 @@ Welcome to the ForzaTech Studio documentation. Use the links below to find guida
 | Guide | Description |
 |---|---|
 | [Getting Started](getting-started.md) | Installation, first launch, and game directory setup |
+| [Vehicle Extraction for Unreal](vehicle-extraction-unreal.md) | Static vehicle extraction workflow, material inventory JSON, and PNG texture package notes |
 
 ---
 
