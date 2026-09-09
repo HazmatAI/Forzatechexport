@@ -120,14 +120,21 @@ namespace ForzaTechStudio.Views
                 if (model.Bundle == null)
                     continue;
 
-                foreach (var material in model.Bundle.Blobs.OfType<MaterialBlob>())
+                foreach (var (_, geometry) in model.Meshes)
                 {
-                    string? materialName = material.Metadatas
-                        .OfType<NameMetadata>()
-                        .FirstOrDefault()
-                        ?.Name;
+                    var sourceMesh = geometry?.SourceMesh;
+                    if (sourceMesh == null)
+                        continue;
 
-                    string safeMaterialName = ObjExportService.ExtractMaterialBaseName(materialName ?? string.Empty);
+                    short materialId = sourceMesh.MaterialIds != null && sourceMesh.MaterialIds.Length > 1
+                        ? sourceMesh.MaterialIds[1]
+                        : sourceMesh.MaterialId;
+                    var material = model.Bundle.Blobs.OfType<MaterialBlob>().FirstOrDefault(candidate =>
+                        (short)(candidate.Metadatas.OfType<IdentifierMetadata>().FirstOrDefault()?.Id ?? candidate.Id) == materialId);
+                    if (material == null)
+                        continue;
+
+                    string safeMaterialName = ObjExportService.GetExportMaterialSlotName(model.ModelBinName, geometry);
                     if (string.IsNullOrWhiteSpace(safeMaterialName) || materialMap.ContainsKey(safeMaterialName))
                         continue;
 

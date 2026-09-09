@@ -9,6 +9,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using ForzaTools.Bundles.Blobs;
 
 namespace ForzaTechStudio.Views
 {
@@ -33,7 +34,9 @@ namespace ForzaTechStudio.Views
             int vehicleTextureCount = CountPngFiles(vehicleDirectory);
 
             var gameSource = await ResolveMaterialTextureGameSourceAsync();
-            var sharedMaterialCache = new Dictionary<string, IReadOnlyList<VehicleTextureRequest>>(StringComparer.OrdinalIgnoreCase);
+            // Keep the materialbin and its linked shader together.  Texture extraction alone loses
+            // the provenance and scalar/vector defaults that an Unreal importer needs.
+            var sharedMaterialCache = new Dictionary<string, MaterialsAndShadersWorkspace?>(StringComparer.OrdinalIgnoreCase);
             var exportedTextureFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var workspaceService = new MaterialsAndShadersWorkspaceService();
             int unresolvedCount = 0;
@@ -51,17 +54,19 @@ namespace ForzaTechStudio.Views
                     if (!string.IsNullOrWhiteSpace(materialPath) && gameSource.IsConfigured)
                     {
                         string materialCacheKey = NormalizeTexturePackagePath(materialPath);
-                        if (!sharedMaterialCache.TryGetValue(materialCacheKey, out var inheritedTextures))
+                        if (!sharedMaterialCache.TryGetValue(materialCacheKey, out var workspace))
                         {
-                            inheritedTextures = await Task.Run(() => LoadSharedMaterialTextureRequests(
+                            workspace = await Task.Run(() => TryLoadSharedMaterialWorkspace(
                                 workspaceService,
                                 gameSource,
                                 materialPath));
-                            sharedMaterialCache[materialCacheKey] = inheritedTextures;
+                            sharedMaterialCache[materialCacheKey] = workspace;
                         }
 
-                        foreach (var texture in inheritedTextures)
+                        foreach (var texture in ReadWorkspaceTextureRequests(workspace))
                             effectiveTextures[texture.Slot] = texture;
+
+                        EnrichMaterialForUnreal(material, workspace);
                     }
 
                     // Instance parameters in the car override inherited material/shader defaults.
@@ -79,12 +84,14 @@ namespace ForzaTechStudio.Views
                             libraryDirectory,
                             packageFolderName,
                             exportedTextureFiles);
+                        exported.Json["unrealBinding"] = CreateUnrealTextureBinding(request);
                         resolvedTextures.Add(exported.Json);
                         if (!exported.Resolved)
                             unresolvedCount++;
                     }
 
                     material["resolvedTextures"] = resolvedTextures;
+                    AddUnrealTextureBindings(material, resolvedTextures);
                     AddNeutralCarPaintFallback(material);
                 }
             }
@@ -144,32 +151,117 @@ namespace ForzaTechStudio.Views
             return new VehicleTextureGameSource(string.Empty, string.Empty);
         }
 
-        private static IReadOnlyList<VehicleTextureRequest> LoadSharedMaterialTextureRequests(
+        private static MaterialsAndShadersWorkspace? TryLoadSharedMaterialWorkspace(
             MaterialsAndShadersWorkspaceService workspaceService,
             VehicleTextureGameSource gameSource,
             string materialPath)
         {
             try
             {
-                var workspace = workspaceService.LoadFromGamePath(
+                return workspaceService.LoadFromGamePath(
                     gameSource.GameId,
                     gameSource.RootPath,
                     materialPath);
-
-                return workspace.TextureReferences
-                    .Where(texture => HasTextureReference(texture.TexturePath, texture.PathHashText))
-                    .Where(texture => !IsExcludedDamageTexture(texture.ParameterName, texture.TexturePath))
-                    .Select(texture => new VehicleTextureRequest(
-                        texture.ParameterName,
-                        texture.TexturePath,
-                        texture.PathHashText,
-                        texture.IsExplicitOverride ? "sharedMaterialOverride" : "shaderDefault",
-                        texture.PreviewSwatchInfo))
-                    .ToList();
             }
             catch
             {
+                return null;
+            }
+        }
+
+        private static IEnumerable<VehicleTextureRequest> ReadWorkspaceTextureRequests(MaterialsAndShadersWorkspace? workspace)
+        {
+            if (workspace == null)
                 return [];
+
+            return workspace.TextureReferences
+                .Where(texture => HasTextureReference(texture.TexturePath, texture.PathHashText))
+                .Where(texture => !IsExcludedDamageTexture(texture.ParameterName, texture.TexturePath))
+                .Select(texture => new VehicleTextureRequest(
+                    texture.ParameterName,
+                    texture.TexturePath,
+                    texture.PathHashText,
+                    texture.IsExplicitOverride ? "sharedMaterialOverride" : "shaderDefault",
+                    texture.PreviewSwatchInfo));
+        }
+
+        private static void EnrichMaterialForUnreal(JsonObject material, MaterialsAndShadersWorkspace? workspace)
+        {
+            if (workspace == null)
+                return;
+
+            material["shader"] = new JsonObject
+            {
+                ["path"] = workspace.MaterialDocument?.ShaderPath ?? string.Empty,
+                ["resolvedSource"] = workspace.ResolvedLinkedShaderSource ?? string.Empty,
+                ["materialbinSource"] = workspace.MaterialDocument?.SourceDisplayPath ?? string.Empty,
+                ["parameterMappings"] = new JsonObject
+                {
+                    ["constantBuffers"] = CreateMappingJson(workspace.ConstantBufferMappings),
+                    ["textures"] = CreateMappingJson(workspace.TextureMappings),
+                    ["samplers"] = CreateMappingJson(workspace.SamplerMappings)
+                }
+            };
+
+            // For each parameter, retain the winning value and its origin.  The precedence is
+            // shader default < materialbin override < vehicle material-instance override.
+            var effective = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
+            AddEffectiveParameters(effective, workspace.ShaderDocument?.DefaultParameters, "shaderDefault");
+            AddEffectiveParameters(effective, workspace.MaterialDocument?.Parameters, "materialbinOverride");
+            AddJsonParameters(effective, material, "vehicleOverride");
+            material["effectiveParameters"] = new JsonArray(effective.Values
+                .OrderBy(parameter => parameter["name"]?.GetValue<string>(), StringComparer.OrdinalIgnoreCase)
+                .Select(parameter => (JsonNode?)parameter)
+                .ToArray());
+        }
+
+        private static JsonArray CreateMappingJson(IEnumerable<MaterialShaderMappingItem> mappings)
+        {
+            return new JsonArray(mappings.Select(mapping => (JsonNode?)new JsonObject
+            {
+                ["name"] = mapping.Name,
+                ["nameHash"] = mapping.NameHashText,
+                ["slot"] = mapping.SlotText,
+                ["byteOffset"] = mapping.ByteOffsetText,
+                ["guid"] = mapping.GuidText
+            }).ToArray());
+        }
+
+        private static void AddEffectiveParameters(
+            Dictionary<string, JsonObject> effective,
+            IEnumerable<ShaderParameter>? parameters,
+            string source)
+        {
+            if (parameters == null)
+                return;
+
+            foreach (var parameter in parameters)
+            {
+                var json = CreateParameterJson(parameter);
+                json["source"] = source;
+                effective[$"0x{parameter.NameHash:X8}"] = json;
+            }
+        }
+
+        private static void AddJsonParameters(
+            Dictionary<string, JsonObject> effective,
+            JsonObject material,
+            string source)
+        {
+            foreach (string category in new[] { "colors", "scalars", "settings", "textures", "samplers", "vectors" })
+            {
+                if (material[category] is not JsonArray parameters)
+                    continue;
+
+                foreach (var parameter in parameters.OfType<JsonObject>())
+                {
+                    var json = (JsonObject)parameter.DeepClone();
+                    json["source"] = source;
+                    string key = json["nameHash"]?.GetValue<string>()
+                        ?? json["name"]?.GetValue<string>()
+                        ?? Guid.NewGuid().ToString("N");
+                    effective[key] = json;
+                }
             }
         }
 
@@ -308,6 +400,83 @@ namespace ForzaTechStudio.Views
                 ["resolved"] = false,
                 ["reason"] = reason
             });
+        }
+
+        private static JsonObject CreateUnrealTextureBinding(VehicleTextureRequest request)
+        {
+            string value = $"{request.Slot} {request.GamePath}".ToLowerInvariant();
+            string role;
+            string channels = "rgb";
+            bool srgb = false;
+            string compression = "masks";
+
+            if (value.Contains("normal"))
+            {
+                role = "normal";
+                compression = "normalmap";
+            }
+            else if (value.Contains("rmao") || value.Contains("roughmetalao") || value.Contains("orm"))
+            {
+                role = "packedOrm";
+                channels = "R=ambientOcclusion,G=roughness,B=metallic";
+            }
+            else if (value.Contains("basecolor") || value.Contains("base_color") ||
+                     value.Contains("albedo") || value.Contains("diffuse") || value.Contains("color"))
+            {
+                role = "baseColor";
+                if (value.Contains("alpha"))
+                    channels = "RGB=baseColor,A=opacityMask";
+                srgb = true;
+                compression = "default";
+            }
+            else if (value.Contains("rough"))
+                role = "roughness";
+            else if (value.Contains("metal"))
+                role = "metallic";
+            else if (value.Contains("ambientocclusion") || value.Contains("_ao") || value.Contains("ao_"))
+                role = "ambientOcclusion";
+            else if (value.Contains("emiss") || value.Contains("glow"))
+            {
+                role = "emissive";
+                srgb = true;
+                compression = "default";
+            }
+            else if (value.Contains("opacity") || value.Contains("alpha"))
+                role = "opacity";
+            else
+            {
+                role = "custom";
+                compression = "default";
+            }
+
+            return new JsonObject
+            {
+                ["role"] = role,
+                ["channels"] = channels,
+                ["sRGB"] = srgb,
+                ["compression"] = compression,
+                ["translation"] = "heuristic"
+            };
+        }
+
+        private static void AddUnrealTextureBindings(JsonObject material, JsonArray resolvedTextures)
+        {
+            if (material["unreal"] is not JsonObject unreal)
+            {
+                unreal = new JsonObject();
+                material["unreal"] = unreal;
+            }
+
+            unreal["textureBindings"] = new JsonArray(resolvedTextures
+                .OfType<JsonObject>()
+                .Select(texture => (JsonNode?)new JsonObject
+                {
+                    ["parameter"] = texture["slot"]?.DeepClone(),
+                    ["file"] = texture["file"]?.DeepClone(),
+                    ["resolved"] = texture["resolved"]?.DeepClone(),
+                    ["binding"] = texture["unrealBinding"]?.DeepClone()
+                })
+                .ToArray());
         }
 
         private static void AddNeutralCarPaintFallback(JsonObject material)

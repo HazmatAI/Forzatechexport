@@ -74,7 +74,7 @@ namespace ForzaTechStudio.Services
                         bool hasColors  = includeColors && data.Colors != null && data.Colors.Length == vertCount;
                         bool hasIdx     = data.Indices  != null && data.Indices.Length > 0;
 
-                        string safeMat = ExtractMaterialBaseName(data.MaterialName ?? "default");
+                        string safeMat = GetExportMaterialSlotName(model.ModelBinName, data);
 
                         // Named group for this material section within the mesh object.
                         sb.AppendLine($"g {safeMat}");
@@ -180,7 +180,7 @@ namespace ForzaTechStudio.Services
                     if (data == null) continue;
 
                     string rawMat  = data.MaterialName ?? "default";
-                    string safeMat = ExtractMaterialBaseName(rawMat);
+                    string safeMat = GetExportMaterialSlotName(model.ModelBinName, data);
                     if (seen.ContainsKey(safeMat)) continue;
 
                     Vector3? color = previewColors.TryGetValue(rawMat, out var found) ? found : null;
@@ -291,6 +291,39 @@ namespace ForzaTechStudio.Services
             // Strip known material extensions
             var name = Path.GetFileNameWithoutExtension(leaf);
             return SanitiseName(string.IsNullOrWhiteSpace(name) ? rawName : name);
+        }
+
+        // FBX and OBJ material names must be unique across a whole vehicle export.
+        // A bare Forza material name ("chrome", "carPaint", ...) is not enough: each
+        // modelbin can carry a different material instance with that friendly name.
+        internal static string GetExportMaterialSlotName(string modelBinName, ForzaGeometryData? data)
+        {
+            string baseName = ExtractMaterialBaseName(data?.MaterialName ?? "default");
+            MeshBlob? mesh = data?.SourceMesh;
+            if (mesh == null)
+                return baseName;
+
+            short materialId = mesh.MaterialIds != null && mesh.MaterialIds.Length > 1
+                ? mesh.MaterialIds[1]
+                : mesh.MaterialId;
+            string modelSource = modelBinName ?? string.Empty;
+            string modelName = SanitiseName(Path.GetFileNameWithoutExtension(modelSource));
+            // Identical modelbin file names can appear in distinct archive directories. Add a
+            // stable source fingerprint so their otherwise identical material IDs cannot merge.
+            return $"{baseName}__{modelName}_{GetStableNameHash(modelSource):X8}_{unchecked((ushort)materialId):X4}";
+        }
+
+        private static uint GetStableNameHash(string value)
+        {
+            const uint offsetBasis = 2166136261;
+            const uint prime = 16777619;
+            uint hash = offsetBasis;
+            foreach (char character in value)
+            {
+                hash ^= char.ToUpperInvariant(character);
+                hash *= prime;
+            }
+            return hash;
         }
 
         private static string SanitiseName(string name)

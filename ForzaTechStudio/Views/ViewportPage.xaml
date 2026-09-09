@@ -1854,6 +1854,18 @@
                 </Button.Flyout>
             </Button>
 
+            <!-- Primary static-vehicle workflow: geometry, material manifest and PNG package. -->
+            <Button x:Name="ExportVehicleForUnrealBtn"
+                    Click="ExportVehicleForUnreal_Click"
+                    IsEnabled="{x:Bind ViewModel.HasLoadedModelBins, Mode=OneWay}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    ToolTipService.ToolTip="One-click Unreal export: FBX geometry + material JSON + PNG texture package">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xEDE1;" FontSize="14"/>
+                    <TextBlock Text="Export Vehicle for Unreal" FontWeight="SemiBold"/>
+                </StackPanel>
+            </Button>
+
             <Button x:Name="SaveAllMaterialsJsonBtn"
                     Click="SaveAllMaterialsJson_Click"
                     IsEnabled="{x:Bind ViewModel.HasLoadedModelBins, Mode=OneWay}"

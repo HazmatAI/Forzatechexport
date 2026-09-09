@@ -153,7 +153,7 @@ namespace ForzaTechStudio.Views
             var parts = new JsonArray();
 
             foreach (var mesh in meshes.OrderBy(mesh => BuildNodePath(mesh), StringComparer.OrdinalIgnoreCase))
-                AddGeometryMaterialUsage(mesh, mesh.ParentModelBin, mesh.GeometryData?.SourceMesh, materialsByKey, parts);
+                AddGeometryMaterialUsage(mesh, mesh.ParentModelBin, mesh.GeometryData, materialsByKey, parts);
 
             foreach (var modelBin in fullModelBins)
             {
@@ -187,7 +187,7 @@ namespace ForzaTechStudio.Views
             return new JsonObject
             {
                 ["schema"] = "ForzaTechStudio.MaterialInventory",
-                ["schemaVersion"] = 2,
+                ["schemaVersion"] = 3,
                 ["exportedAtUtc"] = DateTime.UtcNow.ToString("O"),
                 ["summary"] = new JsonObject
                 {
@@ -208,10 +208,11 @@ namespace ForzaTechStudio.Views
         private static void AddGeometryMaterialUsage(
             IViewerNode geometryNode,
             ModelBinNode modelBin,
-            MeshBlob? meshBlob,
+            ForzaGeometryData? geometryData,
             Dictionary<string, JsonObject> materialsByKey,
             JsonArray parts)
         {
+            MeshBlob? meshBlob = geometryData?.SourceMesh;
             if (modelBin?.Bundle == null || meshBlob == null)
                 return;
 
@@ -227,8 +228,31 @@ namespace ForzaTechStudio.Views
             parts.Add(new JsonObject
             {
                 ["mesh"] = geometryNode.Name,
+                ["meshPath"] = BuildNodePath(geometryNode),
                 ["model"] = modelBin.Name,
-                ["material"] = materialKey
+                ["modelSource"] = modelBin.ZipEntryName ?? modelBin.FilePath ?? modelBin.Name,
+                // This is the exact slot identifier emitted by the current OBJ/FBX exporters.
+                ["unrealMaterialSlot"] = ObjExportService.GetExportMaterialSlotName(
+                    GetUnrealExportModelIdentity(modelBin), geometryData),
+                ["material"] = materialKey,
+                ["materialBinding"] = new JsonObject
+                {
+                    ["primaryMaterialId"] = materialId,
+                    ["primaryMaterialIdHex"] = $"0x{unchecked((ushort)materialId):X4}",
+                    ["materialGroups"] = new JsonArray((meshBlob.MaterialGroups ?? [])
+                        .Select(group => new JsonArray(group.Select(id => JsonValue.Create(id)).ToArray()))
+                        .ToArray()),
+                    ["activeMaterialGroup"] = 0,
+                    ["activeMaterialGroupIndex"] = meshBlob.MaterialIds != null && meshBlob.MaterialIds.Length > 1 ? 1 : 0
+                },
+                ["renderHints"] = new JsonObject
+                {
+                    ["transparent"] = meshBlob.IsTransparent,
+                    ["decal"] = meshBlob.IsDecal,
+                    ["alphaToCoverage"] = meshBlob.IsAlphaToCoverage,
+                    ["lodMin"] = meshBlob.LODLevel1,
+                    ["lodMax"] = meshBlob.LODLevel2
+                }
             });
         }
 
@@ -317,7 +341,9 @@ namespace ForzaTechStudio.Views
             {
                 ["key"] = key,
                 ["name"] = materialName,
+                ["sourceMaterialId"] = $"0x{materialId:X8}",
                 ["materialPath"] = materialResource?.Path ?? string.Empty,
+                ["unreal"] = CreateUnrealMaterialHint(materialName, materialResource?.Path),
                 ["colors"] = colors,
                 ["scalars"] = scalars,
                 ["settings"] = settings,
@@ -337,9 +363,35 @@ namespace ForzaTechStudio.Views
             return new JsonObject
             {
                 ["name"] = name,
+                ["nameHash"] = $"0x{parameter.NameHash:X8}",
                 ["type"] = parameter.Type.ToString(),
                 ["category"] = GetParameterExportCategory(parameter.Type, name),
+                ["guid"] = parameter.Guid == Guid.Empty ? null : parameter.Guid.ToString("D"),
                 ["value"] = CreateParameterValueJson(parameter.Value)
+            };
+        }
+
+        private static JsonObject CreateUnrealMaterialHint(string materialName, string? materialPath)
+        {
+            string text = $"{materialName} {materialPath}".ToLowerInvariant();
+            string family = text.Contains("carpaint") || text.Contains("car_paint")
+                ? "carPaint"
+                : text.Contains("glass") || text.Contains("windshield") || text.Contains("lens")
+                    ? "glass"
+                    : text.Contains("decal") || text.Contains("livery") || text.Contains("sticker")
+                        ? "decal"
+                        : text.Contains("emiss") || text.Contains("light")
+                            ? "emissive"
+                            : "pbr";
+
+            return new JsonObject
+            {
+                ["family"] = family,
+                ["masterMaterial"] = family == "carPaint" ? "M_Forza_CarPaint" : "M_Forza_PBR",
+                ["translation"] = "heuristic",
+                ["notes"] = family == "carPaint"
+                    ? "Dynamic game paint; use a static clear-coat fallback or set the desired paint color in Unreal."
+                    : "Simplified PBR translation; shader graph parity is not implied."
             };
         }
 
@@ -368,20 +420,23 @@ namespace ForzaTechStudio.Views
                 int intValue => JsonValue.Create(intValue),
                 uint uintValue => JsonValue.Create(uintValue),
                 long longValue => JsonValue.Create(longValue),
-                float floatValue => JsonValue.Create(floatValue),
-                double doubleValue => JsonValue.Create(doubleValue),
+                // Some game material constants are uninitialised sentinels (NaN/Infinity).
+                // JSON has no representation for them; preserve the parameter while exporting
+                // an explicit null instead of failing the whole vehicle package.
+                float floatValue => CreateFiniteJsonNumber(floatValue),
+                double doubleValue => CreateFiniteJsonNumber(doubleValue),
                 string stringValue => JsonValue.Create(stringValue),
                 Vector2 vector => new JsonObject
                 {
-                    ["x"] = vector.X,
-                    ["y"] = vector.Y
+                    ["x"] = CreateFiniteJsonNumber(vector.X),
+                    ["y"] = CreateFiniteJsonNumber(vector.Y)
                 },
                 Vector4 vector => new JsonObject
                 {
-                    ["x"] = vector.X,
-                    ["y"] = vector.Y,
-                    ["z"] = vector.Z,
-                    ["w"] = vector.W
+                    ["x"] = CreateFiniteJsonNumber(vector.X),
+                    ["y"] = CreateFiniteJsonNumber(vector.Y),
+                    ["z"] = CreateFiniteJsonNumber(vector.Z),
+                    ["w"] = CreateFiniteJsonNumber(vector.W)
                 },
                 TextureParameter texture => new JsonObject
                 {
@@ -399,6 +454,12 @@ namespace ForzaTechStudio.Views
                 _ => JsonValue.Create(value.ToString())
             };
         }
+
+        private static JsonNode? CreateFiniteJsonNumber(float value)
+            => float.IsFinite(value) ? JsonValue.Create(value) : null;
+
+        private static JsonNode? CreateFiniteJsonNumber(double value)
+            => double.IsFinite(value) ? JsonValue.Create(value) : null;
 
         private static short GetAssignedMaterialIdForExport(MeshBlob meshBlob)
         {

@@ -192,11 +192,11 @@ namespace ForzaTechStudio.Services
 
             for (int fi = 0; fi < allMeshes.Count; fi++)
             {
-                var (_, mbIdx, _, data) = allMeshes[fi];
+                var (modelName, mbIdx, _, data) = allMeshes[fi];
                 long geoId  = MeshGeoId(fi);
                 long mdlId  = MeshModelId(fi);
                 long parent = mbNodeId[mbIdx];
-                string mat  = ObjExportService.ExtractMaterialBaseName(data.MaterialName ?? "default");
+                string mat  = ObjExportService.GetExportMaterialSlotName(modelName, data);
                 long matId  = MatNodeId(matIndex[mat]);
 
                 sb.AppendLine($"\tC: \"OO\",{geoId},{mdlId}");
@@ -569,11 +569,11 @@ namespace ForzaTechStudio.Services
 
                     for (int fi = 0; fi < allMeshes.Count; fi++)
                     {
-                        var (_, mbIdx, _, meshData) = allMeshes[fi];
+                        var (modelName, mbIdx, _, meshData) = allMeshes[fi];
                         long geoId  = MeshGeoId(fi);
                         long mdlId  = MeshModelId(fi);
                         long parent = mbNodeId[mbIdx];
-                        string mat  = ObjExportService.ExtractMaterialBaseName(meshData.MaterialName ?? "default");
+                        string mat  = ObjExportService.GetExportMaterialSlotName(modelName, meshData);
                         long matId  = MatNodeId(matIndex[mat]);
 
                         BN(conns, "C", new[] { BP.S("OO"), BP.I64(geoId), BP.I64(mdlId) });
@@ -975,9 +975,9 @@ namespace ForzaTechStudio.Services
         {
             var ml = new List<string>();
             var mi = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            foreach (var (_, _, _, d) in meshes)
+            foreach (var (modelName, _, _, d) in meshes)
             {
-                string m = ObjExportService.ExtractMaterialBaseName(d.MaterialName ?? "default");
+                string m = ObjExportService.GetExportMaterialSlotName(modelName, d);
                 if (!mi.ContainsKey(m)) { mi[m] = ml.Count; ml.Add(m); }
             }
             return (ml, mi);
