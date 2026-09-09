@@ -439,4 +439,7 @@ FodyWeavers.xsd
 
 /.vscode/tasks.json
 *.py
+!Tools/
+!Tools/Unreal/
+!Tools/Unreal/ForzaMaterialImporter.py
 /ForzaTechStudio/Resources

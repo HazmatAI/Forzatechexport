@@ -93,6 +93,7 @@
     <Content Include="..\docs\swatchbin-viewer.md" Link="docs\swatchbin-viewer.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\docs\create-zip.md" Link="docs\create-zip.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\docs\changelogs.md" Link="docs\changelogs.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\docs\vehicle-extraction-unreal.md" Link="docs\vehicle-extraction-unreal.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\ForzaTools.Bundles\ForzaTools.Bundles.csproj" />
