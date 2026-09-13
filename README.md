@@ -18,7 +18,7 @@ ForzaTech Studio is a WinUI 3 desktop app for working with Forza Motorsport and 
 
 ## Vehicle Extraction Build
 
-This fork includes extra workflow helpers for static vehicle extraction, with the goal of moving a complete car into Unreal Engine as clean geometry plus usable material and texture data. The 3D Viewer can export a compact material inventory JSON for the selected vehicle parts, collect the vehicle-specific swatchbin textures, resolve shared material/shader library texture references, and write the resolved assets as PNG files for easier import into DCC tools and Unreal. See [Vehicle Extraction for Unreal](docs/vehicle-extraction-unreal.md) for the workflow notes.
+This fork includes extra workflow helpers for static vehicle extraction, with the goal of moving a complete car into Unreal Engine as clean geometry plus usable material and texture data. The 3D Viewer can export a compact material inventory JSON for the selected vehicle parts, collect the vehicle-specific swatchbin textures, resolve shared material/shader library texture references, and write the resolved assets as PNG files for easier import into DCC tools and Unreal. See [Vehicle Extraction for Unreal](docs/vehicle-extraction-unreal.md) and the tested [Unreal vehicle pipeline](docs/unreal-vehicle-pipeline.md) for the complete export, material-rebuild, and actor-grouping workflow.
 
 > [!NOTE]
 > Asset extraction is for personal modding and research purposes only. Modifying game files may break the code of conduct and terms and conditions, use at your own risk.

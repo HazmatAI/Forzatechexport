@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Windows.Storage.Pickers;
@@ -86,7 +87,7 @@ namespace ForzaTechStudio.Views
             string fbxPath = Path.Combine(folder.Path, $"{baseName}.fbx");
             string jsonPath = Path.Combine(folder.Path, $"{baseName}_materials.json");
             string unrealJsonPath = Path.Combine(folder.Path, $"{baseName}_unreal.json");
-            var exportModels = BuildUnrealVehicleExportModels(fullModelBins, meshes);
+            var exportModels = BuildUnrealVehicleExportModels(selectedNodes, fullModelBins, meshes);
             if (exportModels.Count == 0)
             {
                 App.ShowErrorDialog("No exportable vehicle meshes were found in the current selection.");
@@ -101,10 +102,15 @@ namespace ForzaTechStudio.Views
             {
                 // The PNG material package is the authoritative texture source for Unreal. Avoid
                 // exporting a second, ambiguous legacy texture folder beside the FBX.
+                // Unreal's FBX importer accepts the service's FBX 7.4 ASCII output and
+                // preserves its Model -> Geometry hierarchy.  Do not use the custom
+                // binary writer here: some FBX SDK consumers reject that stream before
+                // scene creation, which previously forced users to flatten the vehicle
+                // through OBJ and lose per-part editability.
                 await Task.Run(() => FbxExportService.Export(
                     exportModels,
                     fbxPath,
-                    FbxExportFormat.Binary,
+                    FbxExportFormat.Ascii,
                     null,
                     _exportOptions));
 
@@ -147,11 +153,33 @@ namespace ForzaTechStudio.Views
         }
 
         private List<ModelBinExportData> BuildUnrealVehicleExportModels(
+            IEnumerable<IViewerNode> selectedNodes,
             IEnumerable<ModelBinNode> fullModelBins,
             IEnumerable<MeshNode> meshes)
         {
             var selectedMeshes = meshes.ToHashSet();
-            return fullModelBins
+            var carbinInstances = EnumerateViewerNodes<CarbinModelNode>(selectedNodes)
+                .Where(instance => instance.IsChecked == true && instance.UseTransforms)
+                .Select(instance =>
+                {
+                    var modelBin = FindMatchingModelBin(instance);
+                    return modelBin != null &&
+                           TryResolveCarbinInstanceTransform(instance, modelBin, out Matrix4x4 transform)
+                        ? (Instance: instance, ModelBin: modelBin, Transform: transform, IsValid: true)
+                        : (Instance: instance, ModelBin: modelBin!, Transform: Matrix4x4.Identity, IsValid: false);
+                })
+                .Where(item => item.IsValid)
+                .OrderBy(item => BuildNodePath(item.Instance), StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            // Modelbins used by a Carbin instance are source libraries. Exporting their raw
+            // meshes as well would leave a duplicate wheel/trim/etc. at the vehicle origin.
+            var instancedModelBins = carbinInstances
+                .Select(item => item.ModelBin)
+                .ToHashSet();
+
+            var result = fullModelBins
+                .Where(model => !instancedModelBins.Contains(model))
                 .OrderBy(model => model.Name, StringComparer.OrdinalIgnoreCase)
                 .Select(model => new ModelBinExportData(
                     GetUnrealExportModelIdentity(model),
@@ -165,6 +193,83 @@ namespace ForzaTechStudio.Views
                         .ToList()))
                 .Where(model => model.Meshes.Count > 0)
                 .ToList();
+
+            int instanceOrdinal = 0;
+            foreach (var item in carbinInstances)
+            {
+                string instanceName = BuildUnrealInstanceName(item.Instance, instanceOrdinal++);
+                var instanceMeshes = item.ModelBin.Children
+                    .OfType<MeshNode>()
+                    .Where(mesh => mesh.IsChecked == true)
+                    .Where(mesh => !IsShadowOnlyVehicleMesh(mesh))
+                    .Where(mesh => mesh.GeometryData != null &&
+                                   _exportOptions.ShouldExportMesh(mesh.Name, mesh.GeometryData.SourceMesh))
+                    .Select(mesh => (
+                        Name: $"{instanceName}__{mesh.Name}",
+                        Data: CreateCarbinExportGeometry(mesh.GeometryData!, item.Transform)))
+                    .ToList();
+
+                if (instanceMeshes.Count > 0)
+                    result.Add(new ModelBinExportData(
+                        GetUnrealExportModelIdentity(item.ModelBin),
+                        item.ModelBin.Bundle,
+                        instanceMeshes));
+            }
+
+            return result;
+        }
+
+        private static string BuildUnrealInstanceName(CarbinModelNode instance, int ordinal)
+        {
+            string source = $"{BuildNodePath(instance)}|{instance.ModelIndex}|{ordinal}";
+            uint hash = 2166136261;
+            foreach (char character in source)
+            {
+                hash ^= char.ToUpperInvariant(character);
+                hash *= 16777619;
+            }
+
+            string label = string.IsNullOrWhiteSpace(instance.PartName) ? instance.Name : instance.PartName;
+            return $"{label}_{instance.ModelIndex:D2}_{hash:X8}";
+        }
+
+        private static ForzaGeometryData CreateCarbinExportGeometry(
+            ForzaGeometryData source,
+            Matrix4x4 instanceTransform)
+        {
+            // Keep the original quantized positions and MeshBlob so FBX material-slot names
+            // remain identical to the JSON manifest. ResolveGeometry will apply this combined
+            // transform once, baking the instance at its real vehicle position.
+            Matrix4x4 sourceTransform = IsFiniteMatrix(source.BoneTransform)
+                ? source.BoneTransform
+                : Matrix4x4.Identity;
+            Matrix4x4 combinedTransform = sourceTransform * instanceTransform;
+            if (!IsFiniteMatrix(combinedTransform))
+                combinedTransform = sourceTransform;
+
+            return new ForzaGeometryData
+            {
+                Name = source.Name,
+                MaterialName = source.MaterialName,
+                Positions = source.Positions,
+                Normals = source.Normals,
+                UVs = source.UVs,
+                UvChannels = source.UvChannels,
+                Colors = source.Colors,
+                Indices = source.Indices,
+                InitialRenderPositions = source.InitialRenderPositions,
+                SourceMesh = source.SourceMesh,
+                RawPositions = source.RawPositions,
+                MinVertexIndex = source.MinVertexIndex,
+                BoneTransform = combinedTransform,
+                BoneIndex = source.BoneIndex,
+                BoneName = source.BoneName,
+                OriginalBoneTransform = source.OriginalBoneTransform,
+                SourceBone = source.SourceBone,
+                OriginalMeshTranslateRelativeToBone = source.OriginalMeshTranslateRelativeToBone,
+                DamageRawPositions = source.DamageRawPositions,
+                RotationEulerDegrees = source.RotationEulerDegrees
+            };
         }
 
         private static string GetUnrealExportModelIdentity(ModelBinNode model) =>
